@@ -1,0 +1,125 @@
+# Builds https://github.com/estin/simple-completion-language-server (scls)
+# from source and publishes the binaries as a release in THIS repository.
+#
+# Usage: Actions -> "Build and release scls binaries" -> Run workflow
+#   - tag:         release tag to create here, e.g. scls-v0.1.123
+#   - upstream_ref: branch/tag/commit of the upstream repo (default: master)
+#   - citation:    enable the optional `citation` completion feature
+name: Build and release scls binaries
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create in this repo (e.g. scls-v0.1.123)'
+        required: true
+        type: string
+      upstream_ref:
+        description: 'Upstream branch/tag/commit to build'
+        required: false
+        default: master
+        type: string
+      citation:
+        description: 'Build with the citation feature enabled'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  UPSTREAM_REPO: estin/simple-completion-language-server
+  BIN_NAME: simple-completion-language-server
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout upstream source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ inputs.upstream_ref }}
+          path: scls
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: scls
+
+      - name: Build
+        shell: bash
+        working-directory: scls
+        run: |
+          FEATURES=""
+          if [ "${{ inputs.citation }}" = "true" ]; then
+            FEATURES="--features citation"
+          fi
+          cargo build --release --target ${{ matrix.target }} $FEATURES
+
+      - name: Package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            BIN="${BIN_NAME}.exe"
+          else
+            BIN="$BIN_NAME"
+          fi
+          DIR="scls-${TAG}-${TARGET}"
+          mkdir -p "$DIR" dist
+          cp "scls/target/$TARGET/release/$BIN" "$DIR/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a -tzip "dist/${DIR}.zip" "$DIR" >/dev/null
+          else
+            tar -czf "dist/${DIR}.tar.gz" "$DIR"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          body: |
+            Prebuilt binaries of [simple-completion-language-server](https://github.com/${{ env.UPSTREAM_REPO }}) @ `${{ inputs.upstream_ref }}`.
+            Built with the `citation` feature: ${{ inputs.citation }}
