@@ -2,9 +2,14 @@
 # from source and publishes the binaries as a release in THIS repository.
 #
 # Usage: Actions -> "Build and release scls binaries" -> Run workflow
-#   - tag:         release tag to create here, e.g. scls-v0.1.123
-#   - upstream_ref: branch/tag/commit of the upstream repo (default: master)
-#   - citation:    enable the optional `citation` completion feature
+#   - upstream_ref: branch/tag/commit of the upstream repo (default: main)
+#   - tag: release tag to create here; leave empty to auto-name it
+#     "scls-<upstream commit sha>" (upstream has no tags, so the commit
+#     short SHA identifies the build)
+#   - citation: enable the optional `citation` completion feature
+#
+# Builds with `--locked`, matching upstream's recommended install:
+#   cargo install --locked --git https://github.com/estin/simple-completion-language-server.git
 name: Build and release scls binaries
 
 permissions:
@@ -13,14 +18,14 @@ permissions:
 on:
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Release tag to create in this repo (e.g. scls-v0.1.123)'
-        required: true
-        type: string
       upstream_ref:
         description: 'Upstream branch/tag/commit to build'
         required: false
-        default: master
+        default: main
+        type: string
+      tag:
+        description: 'Release tag here (empty = scls-<commit sha>)'
+        required: false
         type: string
       citation:
         description: 'Build with the citation feature enabled'
@@ -34,6 +39,9 @@ env:
 
 jobs:
   build:
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      upstream_sha: ${{ steps.tag.outputs.upstream_sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -55,6 +63,19 @@ jobs:
           ref: ${{ inputs.upstream_ref }}
           path: scls
 
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          SHA="$(git -C scls rev-parse HEAD)"
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="scls-${SHA::8}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$SHA" >> "$GITHUB_OUTPUT"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -73,20 +94,20 @@ jobs:
           if [ "${{ inputs.citation }}" = "true" ]; then
             FEATURES="--features citation"
           fi
-          cargo build --release --target ${{ matrix.target }} $FEATURES
+          cargo build --release --locked --target ${{ matrix.target }} $FEATURES
 
       - name: Package
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          TAG: ${{ inputs.tag }}
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
             BIN="${BIN_NAME}.exe"
           else
             BIN="$BIN_NAME"
           fi
-          DIR="scls-${TAG}-${TARGET}"
+          # avoid doubling the prefix when TAG is auto-derived ("scls-<sha>")
+          DIR="scls-${TAG#scls-}-${TARGET}"
           mkdir -p "$DIR" dist
           cp "scls/target/$TARGET/release/$BIN" "$DIR/"
           if [ "$RUNNER_OS" = "Windows" ]; then
@@ -116,10 +137,12 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
-          name: ${{ inputs.tag }}
+          tag_name: ${{ needs.build.outputs.tag }}
+          name: ${{ needs.build.outputs.tag }}
           files: dist/*
           fail_on_unmatched_files: true
           body: |
-            Prebuilt binaries of [simple-completion-language-server](https://github.com/${{ env.UPSTREAM_REPO }}) @ `${{ inputs.upstream_ref }}`.
+            Prebuilt binaries of [simple-completion-language-server](https://github.com/${{ env.UPSTREAM_REPO }}).
+
+            Built from upstream `${{ inputs.upstream_ref }}` @ `${{ needs.build.outputs.upstream_sha }}` with `cargo build --release --locked`.
             Built with the `citation` feature: ${{ inputs.citation }}
